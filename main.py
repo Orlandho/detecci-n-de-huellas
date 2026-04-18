@@ -21,6 +21,8 @@ MINUTIAE_BORDER_MARGIN = 10
 MINUTIAE_MIN_DISTANCE = 10
 DISPLAY_SCALE = 2.0
 DISPLAY_WINDOW_NAME = "Huella adelgazada + minucias"
+SELECTED_MINUTIA_TYPE = "all"  # "ending", "bifurcation" o "all"
+DRAW_MINUTIA_INDEX = True
 
 
 @dataclass
@@ -310,20 +312,30 @@ def filter_minutiae(
 
 def draw_minutiae_overlay(
     skeleton_255: np.ndarray,
-    endings: List[Minutia],
-    bifurcations: List[Minutia],
+    minutiae: List[Minutia],
+    selected_type: str,
 ) -> np.ndarray:
     """Dibuja minucias sobre huella adelgazada (BGR)."""
     overlay = cv2.cvtColor(skeleton_255, cv2.COLOR_GRAY2BGR)
 
-    for m in endings:
-        cv2.circle(overlay, (m.x, m.y), 3, (255, 0, 0), 1)  # azul
-    for m in bifurcations:
-        cv2.circle(overlay, (m.x, m.y), 3, (0, 0, 255), 1)  # rojo
+    for idx, m in enumerate(minutiae, start=1):
+        color = (255, 0, 0) if m.kind == "ending" else (0, 0, 255)
+        cv2.circle(overlay, (m.x, m.y), 3, color, 1)
+        if DRAW_MINUTIA_INDEX:
+            cv2.putText(
+                overlay,
+                str(idx),
+                (m.x + 4, m.y - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
 
     cv2.putText(
         overlay,
-        "Terminaciones: {} | Bifurcaciones: {}".format(len(endings), len(bifurcations)),
+        "Tipo: {} | Cantidad: {}".format(selected_type, len(minutiae)),
         (10, 20),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -332,6 +344,23 @@ def draw_minutiae_overlay(
         cv2.LINE_AA,
     )
     return overlay
+
+
+def select_minutiae_by_type(
+    endings: List[Minutia],
+    bifurcations: List[Minutia],
+    selected_type: str,
+) -> List[Minutia]:
+    selected = selected_type.strip().lower()
+    if selected == "ending":
+        return endings
+    if selected == "bifurcation":
+        return bifurcations
+    if selected == "all":
+        return endings + bifurcations
+    raise ValueError(
+        "SELECTED_MINUTIA_TYPE invalido. Usa: 'ending', 'bifurcation' o 'all'."
+    )
 
 
 def main() -> None:
@@ -355,11 +384,27 @@ def main() -> None:
         min_distance=MINUTIAE_MIN_DISTANCE,
     )
 
-    result = draw_minutiae_overlay(pruned, endings, bifurcations)
+    selected_minutiae = select_minutiae_by_type(
+        endings, bifurcations, SELECTED_MINUTIA_TYPE
+    )
+
+    result = draw_minutiae_overlay(pruned, selected_minutiae, SELECTED_MINUTIA_TYPE)
 
     print("Pipeline completado")
     print("Terminaciones detectadas: {}".format(len(endings)))
     print("Bifurcaciones detectadas: {}".format(len(bifurcations)))
+    print(
+        "Minucias del tipo '{}' detectadas: {}".format(
+            SELECTED_MINUTIA_TYPE, len(selected_minutiae)
+        )
+    )
+
+    if selected_minutiae:
+        print("Ubicaciones (x, y):")
+        for idx, m in enumerate(selected_minutiae, start=1):
+            print("  {}. ({}, {}) - {}".format(idx, m.x, m.y, m.kind))
+    else:
+        print("No se detectaron minucias del tipo seleccionado.")
 
     if DISPLAY_SCALE > 1.0:
         display_img = cv2.resize(

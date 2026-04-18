@@ -19,6 +19,8 @@ MAX_THIN_ITERATIONS = 50
 PRUNE_MIN_BRANCH_LENGTH = 12
 MINUTIAE_BORDER_MARGIN = 10
 MINUTIAE_MIN_DISTANCE = 10
+DISPLAY_SCALE = 2.0
+DISPLAY_WINDOW_NAME = "Huella adelgazada + minucias"
 
 
 @dataclass
@@ -359,7 +361,20 @@ def main() -> None:
     print("Terminaciones detectadas: {}".format(len(endings)))
     print("Bifurcaciones detectadas: {}".format(len(bifurcations)))
 
-    cv2.imshow("Huella adelgazada + minucias", result)
+    if DISPLAY_SCALE > 1.0:
+        display_img = cv2.resize(
+            result,
+            None,
+            fx=DISPLAY_SCALE,
+            fy=DISPLAY_SCALE,
+            interpolation=cv2.INTER_NEAREST,
+        )
+    else:
+        display_img = result
+
+    cv2.namedWindow(DISPLAY_WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(DISPLAY_WINDOW_NAME, display_img.shape[1], display_img.shape[0])
+    cv2.imshow(DISPLAY_WINDOW_NAME, display_img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 

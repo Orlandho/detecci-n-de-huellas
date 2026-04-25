@@ -257,24 +257,157 @@ def prune_skeleton(skeleton_255: np.ndarray, min_branch_length: int) -> np.ndarr
     return to_binary255(img)
 
 
-def extract_minutiae(skeleton_255: np.ndarray) -> Tuple[List[Minutia], List[Minutia]]:
-    """Extrae terminaciones y bifurcaciones usando CN."""
+def extract_advanced_minutiae(skeleton_255: np.ndarray, min_branch_length: int = 12) -> List[Minutia]:
     img = to_binary01(skeleton_255)
     h, w = img.shape
-    endings: List[Minutia] = []
-    bifurcations: List[Minutia] = []
 
+    nodes = {}
     for y in range(1, h - 1):
         for x in range(1, w - 1):
-            if img[y, x] != 1:
-                continue
-            cn = crossing_number(img, y, x)
-            if cn == 1:
-                endings.append(Minutia(x=x, y=y, kind="ending", cn=cn))
-            elif cn == 3:
-                bifurcations.append(Minutia(x=x, y=y, kind="bifurcation", cn=cn))
+            if img[y, x] == 1:
+                cn = crossing_number(img, y, x)
+                if cn != 2:
+                    nodes[(y, x)] = cn
 
-    return endings, bifurcations
+    visited_directed_edges = set()
+    edges = []
+
+    for node in list(nodes.keys()):
+        cn = nodes[node]
+        if cn == 0:
+            continue
+        neighbors = get_neighbors8(img, node[0], node[1])
+        for nxt in neighbors:
+            if (node, nxt) in visited_directed_edges:
+                continue
+
+            path = [node, nxt]
+            prev = node
+            curr = nxt
+
+            while True:
+                if curr[0] <= 0 or curr[0] >= h - 1 or curr[1] <= 0 or curr[1] >= w - 1:
+                    break
+
+                if curr in nodes and curr != node:
+                    break
+
+                curr_cn = crossing_number(img, curr[0], curr[1])
+                if curr_cn != 2 and curr not in nodes:
+                    nodes[curr] = curr_cn
+                    break
+
+                if curr in nodes and curr == node:
+                    break
+
+                neighs = get_neighbors8(img, curr[0], curr[1])
+                next_steps = [n for n in neighs if n != prev]
+
+                if not next_steps:
+                    break
+
+                prev = curr
+                curr = next_steps[0]
+
+                if curr in path:
+                    break
+
+                path.append(curr)
+
+            end_node = curr
+            if len(path) >= 2:
+                visited_directed_edges.add((path[0], path[1]))
+                visited_directed_edges.add((path[-1], path[-2]))
+
+            edges.append({
+                'n1': node,
+                'n2': end_node,
+                'path': path,
+                'length': len(path)
+            })
+
+    minutiae_list = []
+    used_nodes = set()
+
+    # 1. Islands (cn=0)
+    for node, cn in nodes.items():
+        if cn == 0:
+            minutiae_list.append(Minutia(x=node[1], y=node[0], kind="island", cn=0))
+            used_nodes.add(node)
+
+    edge_pairs = {}
+    for e in edges:
+        pair = tuple(sorted([e['n1'], e['n2']]))
+        if pair not in edge_pairs:
+            edge_pairs[pair] = []
+        edge_pairs[pair].append(e)
+
+    # 2. Lakes
+    for pair, edgs in edge_pairs.items():
+        if len(edgs) >= 2:
+            n1, n2 = pair
+            cn1, cn2 = nodes.get(n1, 2), nodes.get(n2, 2)
+            if cn1 >= 3 and cn2 >= 3:
+                mid_idx = len(edgs[0]['path']) // 2
+                mid = edgs[0]['path'][mid_idx]
+                minutiae_list.append(Minutia(x=mid[1], y=mid[0], kind="lake", cn=3))
+                used_nodes.add(n1)
+                used_nodes.add(n2)
+                for e in edgs:
+                    e['used'] = True
+
+        if len(edgs) == 1 and pair[0] == pair[1]:
+            n1 = pair[0]
+            cn1 = nodes.get(n1, 2)
+            if cn1 >= 3:
+                mid_idx = len(edgs[0]['path']) // 2
+                mid = edgs[0]['path'][mid_idx]
+                minutiae_list.append(Minutia(x=mid[1], y=mid[0], kind="lake", cn=3))
+                used_nodes.add(n1)
+                edgs[0]['used'] = True
+
+    # 3. Independent Ridge & Island, Spur, Cross over
+    for e in edges:
+        if e.get('used'):
+            continue
+        n1, n2 = e['n1'], e['n2']
+        cn1, cn2 = nodes.get(n1, 2), nodes.get(n2, 2)
+        l = e['length']
+
+        if cn1 == 1 and cn2 == 1:
+            mid = e['path'][l // 2]
+            if l <= 5:
+                minutiae_list.append(Minutia(x=mid[1], y=mid[0], kind="island", cn=1))
+            elif l <= 30:
+                minutiae_list.append(Minutia(x=mid[1], y=mid[0], kind="independ rige", cn=1))
+            used_nodes.add(n1)
+            used_nodes.add(n2)
+            e['used'] = True
+
+        elif (cn1 == 1 and cn2 >= 3) or (cn1 >= 3 and cn2 == 1):
+            if l <= min_branch_length:
+                spur_node = n1 if cn1 == 1 else n2
+                minutiae_list.append(Minutia(x=spur_node[1], y=spur_node[0], kind="spur", cn=1))
+                used_nodes.add(spur_node)
+                e['used'] = True
+
+        elif cn1 >= 3 and cn2 >= 3:
+            if l <= min_branch_length:
+                mid = e['path'][l // 2]
+                minutiae_list.append(Minutia(x=mid[1], y=mid[0], kind="cross over", cn=3))
+                used_nodes.add(n1)
+                used_nodes.add(n2)
+                e['used'] = True
+
+    # 4. Endings and Bifurcations
+    for node, cn in nodes.items():
+        if node not in used_nodes:
+            if cn == 1:
+                minutiae_list.append(Minutia(x=node[1], y=node[0], kind="terminacion", cn=1))
+            elif cn >= 3:
+                minutiae_list.append(Minutia(x=node[1], y=node[0], kind="bifurcacion", cn=3))
+
+    return minutiae_list
 
 
 def filter_minutiae(
@@ -318,8 +451,19 @@ def draw_minutiae_overlay(
     """Dibuja minucias sobre huella adelgazada (BGR)."""
     overlay = cv2.cvtColor(skeleton_255, cv2.COLOR_GRAY2BGR)
 
+    # Colores diferentes para cada tipo
+    color_map = {
+        "terminacion": (255, 0, 0),       # Blue
+        "bifurcacion": (0, 0, 255),       # Red
+        "lake": (0, 255, 0),              # Green
+        "independ rige": (0, 255, 255),   # Yellow
+        "island": (255, 255, 0),          # Cyan
+        "spur": (255, 0, 255),            # Magenta
+        "cross over": (128, 0, 128)       # Purple
+    }
+
     for idx, m in enumerate(minutiae, start=1):
-        color = (255, 0, 0) if m.kind == "ending" else (0, 0, 255)
+        color = color_map.get(m.kind, (255, 255, 255))
         cv2.circle(overlay, (m.x, m.y), 3, color, 1)
         if DRAW_MINUTIA_INDEX:
             cv2.putText(
@@ -347,81 +491,100 @@ def draw_minutiae_overlay(
 
 
 def select_minutiae_by_type(
-    endings: List[Minutia],
-    bifurcations: List[Minutia],
+    minutiae: List[Minutia],
     selected_type: str,
 ) -> List[Minutia]:
     selected = selected_type.strip().lower()
-    if selected == "ending":
-        return endings
-    if selected == "bifurcation":
-        return bifurcations
     if selected == "all":
-        return endings + bifurcations
-    raise ValueError(
-        "SELECTED_MINUTIA_TYPE invalido. Usa: 'ending', 'bifurcation' o 'all'."
-    )
+        return minutiae
+    return [m for m in minutiae if m.kind == selected]
 
+
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
 
 def main() -> None:
+    # 1. Preprocesamiento base (se hace una sola vez)
     gray = load_fingerprint_tif(INPUT_TIF_PATH)
     binary = preprocess_and_binarize(gray)
-
     skeleton = thin_image(binary)
-    pruned = prune_skeleton(skeleton, min_branch_length=PRUNE_MIN_BRANCH_LENGTH)
 
-    endings, bifurcations = extract_minutiae(pruned)
-    endings = filter_minutiae(
-        endings,
-        img_shape=pruned.shape,
-        border_margin=MINUTIAE_BORDER_MARGIN,
-        min_distance=MINUTIAE_MIN_DISTANCE,
-    )
-    bifurcations = filter_minutiae(
-        bifurcations,
-        img_shape=pruned.shape,
+    all_minutiae = extract_advanced_minutiae(skeleton, min_branch_length=PRUNE_MIN_BRANCH_LENGTH)
+    all_minutiae = filter_minutiae(
+        all_minutiae,
+        img_shape=skeleton.shape,
         border_margin=MINUTIAE_BORDER_MARGIN,
         min_distance=MINUTIAE_MIN_DISTANCE,
     )
 
-    selected_minutiae = select_minutiae_by_type(
-        endings, bifurcations, SELECTED_MINUTIA_TYPE
-    )
+    # Contar minucias
+    counts = {}
+    for m in all_minutiae:
+        counts[m.kind] = counts.get(m.kind, 0) + 1
 
-    result = draw_minutiae_overlay(pruned, selected_minutiae, SELECTED_MINUTIA_TYPE)
+    # Crear ventana de Tkinter
+    root = tk.Tk()
+    root.title("Extractor de Minucias")
 
-    print("Pipeline completado")
-    print("Terminaciones detectadas: {}".format(len(endings)))
-    print("Bifurcaciones detectadas: {}".format(len(bifurcations)))
-    print(
-        "Minucias del tipo '{}' detectadas: {}".format(
-            SELECTED_MINUTIA_TYPE, len(selected_minutiae)
-        )
-    )
+    # Frame izquierdo para controles
+    frame_left = tk.Frame(root, padx=10, pady=10)
+    frame_left.pack(side=tk.LEFT, fill=tk.Y)
 
-    if selected_minutiae:
-        print("Ubicaciones (x, y):")
-        for idx, m in enumerate(selected_minutiae, start=1):
-            print("  {}. ({}, {}) - {}".format(idx, m.x, m.y, m.kind))
-    else:
-        print("No se detectaron minucias del tipo seleccionado.")
+    # Frame derecho para imagen
+    frame_right = tk.Frame(root, padx=10, pady=10)
+    frame_right.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
 
-    if DISPLAY_SCALE > 1.0:
-        display_img = cv2.resize(
-            result,
-            None,
-            fx=DISPLAY_SCALE,
-            fy=DISPLAY_SCALE,
-            interpolation=cv2.INTER_NEAREST,
-        )
-    else:
-        display_img = result
+    tk.Label(frame_left, text="Tipo de Minucia:", font=("Helvetica", 12, "bold")).pack(pady=(0, 5))
 
-    cv2.namedWindow(DISPLAY_WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(DISPLAY_WINDOW_NAME, display_img.shape[1], display_img.shape[0])
-    cv2.imshow(DISPLAY_WINDOW_NAME, display_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    tipos = ["all", "terminacion", "bifurcacion", "lake", "independ rige", "island", "spur", "cross over"]
+    combo = ttk.Combobox(frame_left, values=tipos, state="readonly")
+    combo.current(0)
+    combo.pack(pady=5)
+
+    stats_label = tk.Label(frame_left, text="", justify=tk.LEFT, anchor="w", font=("Helvetica", 10))
+    stats_label.pack(pady=20, fill=tk.X)
+
+    img_label = tk.Label(frame_right)
+    img_label.pack(expand=True, fill=tk.BOTH)
+
+    def update_display(event=None):
+        selected_type = combo.get()
+        selected_minutiae = select_minutiae_by_type(all_minutiae, selected_type)
+
+        # Dibujar imagen
+        result_bgr = draw_minutiae_overlay(skeleton, selected_minutiae, selected_type)
+        if DISPLAY_SCALE > 1.0:
+            result_bgr = cv2.resize(
+                result_bgr,
+                None,
+                fx=DISPLAY_SCALE,
+                fy=DISPLAY_SCALE,
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(result_rgb)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+
+        img_label.config(image=img_tk)
+        img_label.image = img_tk  # mantener referencia
+
+        # Actualizar estadisticas
+        stats_text = "Estadísticas Globales:\n"
+        for t in tipos[1:]:
+            stats_text += f"{t.capitalize()}: {counts.get(t, 0)}\n"
+        stats_text += f"Total: {len(all_minutiae)}\n\n"
+        stats_text += f"Mostrando: {len(selected_minutiae)}"
+
+        stats_label.config(text=stats_text)
+
+    combo.bind("<<ComboboxSelected>>", update_display)
+
+    # Inicializar pantalla
+    update_display()
+
+    root.mainloop()
 
 
 if __name__ == "__main__":
